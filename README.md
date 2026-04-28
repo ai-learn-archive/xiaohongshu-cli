@@ -272,6 +272,9 @@ uv sync
 # 本地运行，查看效果
 uv run xhs search "探店" --sorts "杭州滨江同城"
 
+# 无头模式登录（命令行直接返回二维码）
+XHS_BROWSER_HEADLESS=1 uv run xhs login --qrcode
+
 # Run tests
 uv run pytest tests/ -v
 

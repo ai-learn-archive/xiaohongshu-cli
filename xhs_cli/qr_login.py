@@ -12,6 +12,7 @@ Supports two backends:
 from __future__ import annotations
 
 import logging
+import os
 import random
 import subprocess
 import sys
@@ -356,7 +357,14 @@ def _browser_assisted_qrcode_login(
 
     _emit_status(on_status, "🔑 Starting browser-assisted QR login...")
 
-    with Camoufox(headless=False) as browser:
+    force_headless = os.getenv("XHS_BROWSER_HEADLESS", "").strip().lower() in {"1", "true", "yes", "on"}
+    has_display = bool(os.getenv("DISPLAY"))
+    headless = force_headless or not has_display
+
+    if headless and not has_display and not force_headless:
+        _emit_status(on_status, "ℹ️  No DISPLAY detected; launching browser in headless mode.")
+
+    with Camoufox(headless=headless) as browser:
         page = browser.new_page()
 
         def _handle_response(response) -> None:
