@@ -468,7 +468,8 @@ def _http_qrcode_login(
 
     _emit_status(on_status, "🔑 Starting QR code login...")
 
-    with XhsClient(tmp_cookies, request_delay=0) as client:
+    # Avoid hammering the QR endpoints; aggressive polling can trigger risk control / captcha.
+    with XhsClient(tmp_cookies, request_delay=1.0) as client:
         try:
             activate_data = client.login_activate()
             _apply_session_cookies(client, activate_data)
