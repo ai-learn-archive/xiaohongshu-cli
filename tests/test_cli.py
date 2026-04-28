@@ -236,6 +236,151 @@ class TestCliBasic:
         assert "search_result/69ad061d" in result.output
         assert "very-long-token-value" not in result.output
 
+    def test_search_passes_type_and_sorts_filter_tags(self, monkeypatch):
+        called = {}
+
+        class FakeClient:
+            def search_notes(self, keyword, **kwargs):
+                called["keyword"] = keyword
+                called["kwargs"] = kwargs
+                return {"items": [], "has_more": False}
+
+        def fake_handle_command(ctx, action, render, as_json, as_yaml):
+            action(FakeClient())
+            return None
+
+        monkeypatch.setattr("xhs_cli.commands.reading.handle_command", fake_handle_command)
+
+        result = runner.invoke(
+            cli,
+            [
+                "search",
+                "旅行",
+                "--type",
+                "视频",
+                "--sorts",
+                "一周内 已关注 同城",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert called["keyword"] == "旅行"
+        assert called["kwargs"]["note_type"] == 1
+        assert called["kwargs"]["filters"] == [
+            {"tags": ["general"], "type": "sort_type"},
+            {"tags": ["视频"], "type": "filter_note_type"},
+            {"tags": ["一周内"], "type": "filter_note_time"},
+            {"tags": ["已关注"], "type": "filter_note_range"},
+            {"tags": ["同城"], "type": "filter_pos_distance"},
+        ]
+
+    def test_search_rejects_removed_time_option(self):
+        result = runner.invoke(cli, ["search", "旅行", "--time", "一周内"])
+
+        assert result.exit_code != 0
+        assert "No such option: --time" in result.output
+
+    def test_search_sorts_parses_combined_tokens(self, monkeypatch):
+        called = {}
+
+        class FakeClient:
+            def search_notes(self, keyword, **kwargs):
+                called["keyword"] = keyword
+                called["kwargs"] = kwargs
+                return {"items": [], "has_more": False}
+
+        def fake_handle_command(ctx, action, render, as_json, as_yaml):
+            action(FakeClient())
+            return None
+
+        monkeypatch.setattr("xhs_cli.commands.reading.handle_command", fake_handle_command)
+
+        result = runner.invoke(
+            cli,
+            ["search", "旅行", "--sorts", "最多点赞、图文 未看过 附近"],
+        )
+
+        assert result.exit_code == 0
+        assert called["keyword"] == "旅行"
+        assert called["kwargs"]["sort"] == "popularity_descending"
+        assert called["kwargs"]["note_type"] == 2
+        assert called["kwargs"]["filters"] == [
+            {"tags": ["最多点赞"], "type": "sort_type"},
+            {"tags": ["图文"], "type": "filter_note_type"},
+            {"tags": ["不限"], "type": "filter_note_time"},
+            {"tags": ["未看过"], "type": "filter_note_range"},
+            {"tags": ["附近"], "type": "filter_pos_distance"},
+        ]
+
+    @pytest.mark.parametrize(
+        ("sorts_value", "expected_distance_tag", "expected_location"),
+        [
+            ("杭州滨江同城", "同城", "杭州滨江"),
+            ("杭州滨江附近", "附近", "杭州滨江"),
+        ],
+    )
+    def test_search_sorts_location_token_builds_geo(
+        self,
+        monkeypatch,
+        sorts_value,
+        expected_distance_tag,
+        expected_location,
+    ):
+        called = {}
+        captured_locations = []
+
+        class FakeClient:
+            def search_notes(self, keyword, **kwargs):
+                called["keyword"] = keyword
+                called["kwargs"] = kwargs
+                return {"items": [], "has_more": False}
+
+        def fake_handle_command(ctx, action, render, as_json, as_yaml):
+            action(FakeClient())
+            return None
+
+        def fake_build_search_geo(location):
+            captured_locations.append(location)
+            return "encoded-geo"
+
+        monkeypatch.setattr("xhs_cli.commands.reading.handle_command", fake_handle_command)
+        monkeypatch.setattr("xhs_cli.commands.reading.build_search_geo", fake_build_search_geo)
+
+        result = runner.invoke(
+            cli,
+            ["search", "旅行", "--sorts", sorts_value],
+        )
+
+        assert result.exit_code == 0
+        assert called["keyword"] == "旅行"
+        assert called["kwargs"]["geo"] == "encoded-geo"
+        assert called["kwargs"]["filters"] == [
+            {"tags": ["general"], "type": "sort_type"},
+            {"tags": ["不限"], "type": "filter_note_type"},
+            {"tags": ["不限"], "type": "filter_note_time"},
+            {"tags": ["不限"], "type": "filter_note_range"},
+            {"tags": [expected_distance_tag], "type": "filter_pos_distance"},
+        ]
+        assert captured_locations == [expected_location]
+
+    def test_search_sorts_rejects_conflicting_explicit_option(self):
+        result = runner.invoke(
+            cli,
+            ["search", "旅行", "--type", "视频", "--sorts", "图文"],
+        )
+
+        assert result.exit_code != 0
+        assert "冲突" in result.output
+
+    def test_search_sorts_rejects_unknown_token(self):
+        result = runner.invoke(
+            cli,
+            ["search", "旅行", "--sorts", "火星"],
+        )
+
+        assert result.exit_code != 0
+        assert "无法识别筛选词" in result.output
+
     def test_feed_rich_output_shortens_visible_links(self, monkeypatch):
         monkeypatch.setenv("OUTPUT", "rich")
         monkeypatch.setattr(

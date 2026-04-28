@@ -73,6 +73,9 @@ xhs logout                            # Clear saved cookies
 # ─── Search ───────────────────────────────────────
 xhs search "美食"                      # Search notes
 xhs search "旅行" --sort popular       # Sort: general, popular, latest
+xhs search "旅行" --sorts "最多点赞、图文 未看过 附近"  # Combined Chinese filters
+xhs search "探店" --sorts "杭州滨江同城"  # 地点 + 位置距离，会自动查询高德坐标并写入 geo
+xhs search "咖啡" --sorts "杭州滨江附近"  # 同样支持“附近”
 xhs search "穿搭" --type video         # Filter: all, video, image
 xhs search "AI" --page 2              # Pagination
 xhs search-user "用户名"               # Search users
@@ -174,6 +177,7 @@ After any listing command such as `search`, `feed`, `hot`, `user-posts`, `favori
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OUTPUT` | `auto` | Output format: `json`, `yaml`, `rich`, or `auto` (→ YAML when non-TTY) |
+| `GAODE_MAP_API_KEY` | empty | Optional. Required when using `--sorts "杭州滨江同城"` / `--sorts "杭州滨江附近"` so the CLI can geocode the location and send `geo` |
 ## Rate Limiting & Anti-Detection
 
 xiaohongshu-cli includes comprehensive anti-risk-control measures designed to minimize detection:
@@ -264,6 +268,9 @@ xhs_cli/
 ```bash
 # Install dependencies
 uv sync
+
+# 本地运行，查看效果
+uv run xhs search "探店" --sorts "杭州滨江同城"
 
 # Run tests
 uv run pytest tests/ -v
@@ -368,6 +375,7 @@ xhs logout                            # 清除缓存的 Cookie
 # 搜索
 xhs search "美食"                      # 搜索笔记
 xhs search "旅行" --sort popular       # 排序：general, popular, latest
+xhs search "旅行" --sorts "最多点赞、图文 未看过 附近"  # 组合中文筛选，支持空格和 、 分隔
 xhs search-user "用户名"               # 搜索用户
 xhs topics "美食"                      # 搜索话题
 
@@ -424,6 +432,24 @@ xhs unread                             # 未读数
 xhs notifications                      # 评论和 @ 通知
 xhs notifications --type likes         # 赞和收藏通知
 xhs notifications --type connections   # 新增关注通知
+```
+### sorts 参数
+
+| 筛选组 | 可选值 |
+| --- | --- |
+| 排序依据 | 综合、最新、最多点赞、最多评论、最多收藏 |
+| 笔记类型 | 不限、视频、图文 |
+| 发布时间 | 不限、一天内、一周内、半年内 |
+| 搜索范围 | 不限、已看过、未看过、已关注 |
+| 位置距离 | 不限、具体位置+(同城、附近)，需要配置高德地图 API 密钥 |
+
+高德地图 API 密钥配置：[申请入口](https://console.amap.com/dev/key/app)
+```bash
+export GAODE_MAP_API_KEY=your_api_key
+
+// 永久保存请用：
+echo 'export GAODE_MAP_API_KEY=xxx' >> ~/.zshrc
+source ~/.zshrc
 ```
 
 ## 认证策略

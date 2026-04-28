@@ -1,0 +1,14 @@
+---
+description: Use the local xhs CLI from source in this repository
+alwaysApply: true
+---
+
+# Local xhs Execution
+
+In this repository, always run the CLI from source with `uv run xhs ...`.
+
+- Prefer `uv run xhs ...` over bare `xhs ...`
+- Do not suggest `uv tool install xiaohongshu-cli` or `uv tool upgrade xiaohongshu-cli` unless the user explicitly wants to test the published package
+- For authentication checks, use `uv run xhs status`
+- For login flows, use `uv run xhs login`
+- For local development commands, prefer `uv run pytest ...` and `uv run ruff check .`

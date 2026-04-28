@@ -15,28 +15,38 @@ tags:
 # xiaohongshu-cli — Xiaohongshu CLI Tool
 
 **Binary:** `xhs`
+**Repo-local execution:** when working inside this source repository, invoke commands as `uv run xhs`
 **Credentials:** browser cookies (auto-extracted) or browser-assisted QR login (`--qrcode`)
 
 ## Setup
 
 ```bash
-# Install (requires Python 3.10+)
-uv tool install xiaohongshu-cli
-# Or: pipx install xiaohongshu-cli
+# Source checkout / local development (preferred in this repository)
+uv sync
+uv run xhs --help
 
-# Upgrade to latest (recommended to avoid API errors)
+# Installed tool / published package usage
+uv tool install xiaohongshu-cli
 uv tool upgrade xiaohongshu-cli
-# Or: pipx upgrade xiaohongshu-cli
 ```
+
+## Execution Context
+
+Choose the command prefix before running anything:
+
+- In this source repository, use `uv run xhs`
+- Outside the repository with the published package installed, use `xhs`
+
+When the current workspace is this repository, do not suggest `uv tool install xiaohongshu-cli` or `uv tool upgrade xiaohongshu-cli` unless the user explicitly wants to test the packaged release.
 
 ## Authentication
 
-**IMPORTANT FOR AGENTS**: Before executing ANY xhs command, check if credentials exist first. Do NOT assume cookies are configured.
+**IMPORTANT FOR AGENTS**: In this repository, prepend `uv run` to every `xhs` command. Before executing any command, check if credentials exist first. Do NOT assume cookies are configured.
 
 ### Step 0: Check if already authenticated
 
 ```bash
-xhs status --yaml >/dev/null && echo "AUTH_OK" || echo "AUTH_NEEDED"
+uv run xhs status --yaml >/dev/null && echo "AUTH_OK" || echo "AUTH_NEEDED"
 ```
 
 If `AUTH_OK`, skip to [Command Reference](#command-reference).
@@ -47,16 +57,16 @@ If `AUTH_NEEDED`, proceed to Step 1. Prefer `--qrcode` when browser cookie extra
 Ensure user is logged into xiaohongshu.com in any browser supported by [browser_cookie3](https://github.com/borisbabic/browser_cookie3). Supported browsers: Chrome, Arc, Edge, Firefox, Safari, Brave, Chromium, Opera, Opera GX, Vivaldi, LibreWolf, Lynx, w3m. Then:
 
 ```bash
-xhs login                              # auto-detect browser with valid cookies
-xhs login --cookie-source arc          # specify browser explicitly
-xhs login --qrcode                     # browser-assisted QR login with terminal QR output
+uv run xhs login                       # auto-detect browser with valid cookies
+uv run xhs login --cookie-source arc   # specify browser explicitly
+uv run xhs login --qrcode              # browser-assisted QR login with terminal QR output
 ```
 
 Verify with:
 
 ```bash
-xhs status
-xhs whoami
+uv run xhs status
+uv run xhs whoami
 ```
 
 ### Step 2: Handle common auth issues
@@ -66,12 +76,14 @@ xhs whoami
 | `NoCookieError: No 'a1' cookie found` | Guide user to login to xiaohongshu.com in browser |
 | `NeedVerifyError: Captcha required` | Ask user to open browser, complete captcha, then retry |
 | `IpBlockedError: IP blocked` | Suggest switching network (hotspot/VPN) |
-| `SessionExpiredError` | Run `xhs login` to refresh cookies |
+| `SessionExpiredError` | Run `uv run xhs login` in this repository, or `xhs login` for installed-tool usage |
 
 ## Agent Defaults
 
 All machine-readable output uses the envelope documented in [SCHEMA.md](./SCHEMA.md).
 Payloads live under `.data`.
+
+In examples below, command names are shown as CLI syntax. Inside this repository, invoke them with the `uv run xhs ...` prefix.
 
 - Non-TTY stdout → auto YAML
 - `--json` / `--yaml` → explicit format

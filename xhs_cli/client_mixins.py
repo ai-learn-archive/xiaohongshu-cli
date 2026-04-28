@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import mimetypes
+import os
 import random
 import re
 import threading
@@ -12,6 +14,8 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from .constants import CREATOR_HOST, HOME_URL, UPLOAD_HOST, USER_AGENT
 from .cookies import (
@@ -36,9 +40,10 @@ _SEARCH_DEFAULT_FILTERS = [
 _SEARCH_SESSION_TTL_SECONDS = 600
 _SEARCH_SESSION_MAX_SIZE = 128
 _SEARCH_SESSION_LOCK = threading.RLock()
-_SEARCH_SESSION_CACHE: OrderedDict[tuple[str, str, int], dict[str, Any]] = OrderedDict()
+_SEARCH_SESSION_CACHE: OrderedDict[tuple[str, str, int, str], dict[str, Any]] = OrderedDict()
 _SEARCH_SESSION_CACHE_PATH: Path | None = None
 _SEARCH_SESSION_CACHE_LOADED = False
+_GAODE_GEOCODE_URL = "https://restapi.amap.com/v3/geocode/geo"
 
 
 def _generate_search_id() -> str:
@@ -57,33 +62,125 @@ def _generate_search_id() -> str:
     return result
 
 
-def _search_session_key(keyword: str, sort: str, note_type: int) -> tuple[str, str, int]:
-    return (keyword.strip(), sort, note_type)
+def build_search_filters(
+    *,
+    sort_tag: str | None = None,
+    note_type_tag: str | None = None,
+    time_tag: str | None = None,
+    range_tag: str | None = None,
+    distance_tag: str | None = None,
+) -> list[dict[str, Any]]:
+    overrides = {
+        "sort_type": sort_tag,
+        "filter_note_type": note_type_tag,
+        "filter_note_time": time_tag,
+        "filter_note_range": range_tag,
+        "filter_pos_distance": distance_tag,
+    }
+    payload: list[dict[str, Any]] = []
+    for item in _SEARCH_DEFAULT_FILTERS:
+        filter_type = str(item["type"])
+        override_tag = overrides.get(filter_type)
+        tags = [override_tag] if override_tag else list(item.get("tags", []))
+        payload.append({
+            "tags": tags,
+            "type": filter_type,
+        })
+    return payload
+
+
+def build_search_geo(location: str) -> str:
+    normalized_location = location.strip()
+    if not normalized_location:
+        return ""
+
+    api_key = os.getenv("GAODE_MAP_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("使用“位置距离”地点搜索前，请先设置环境变量 GAODE_MAP_API_KEY")
+
+    try:
+        response = httpx.get(
+            _GAODE_GEOCODE_URL,
+            params={"address": normalized_location, "key": api_key},
+            timeout=10.0,
+        )
+    except httpx.HTTPError as exc:
+        raise XhsApiError(f"高德地理编码请求失败: {exc}") from exc
+
+    if response.status_code >= 400:
+        raise XhsApiError(f"高德地理编码请求失败: HTTP {response.status_code}")
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise XhsApiError("高德地理编码返回了无法解析的响应") from exc
+
+    geocodes = payload.get("geocodes")
+    if not isinstance(geocodes, list) or not geocodes:
+        info = payload.get("info") or "未返回 geocodes"
+        raise ValueError(f"高德地理编码未找到地点“{normalized_location}”: {info}")
+
+    raw_location = str(geocodes[0].get("location", "")).strip()
+    longitude_text, separator, latitude_text = raw_location.partition(",")
+    if not separator:
+        raise ValueError(f"高德地理编码返回的 location 无效: {raw_location or '<empty>'}")
+
+    try:
+        geo_payload = json.dumps(
+            {
+                "latitude": float(latitude_text),
+                "longitude": float(longitude_text),
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except ValueError as exc:
+        raise ValueError(f"高德地理编码返回的坐标无效: {raw_location}") from exc
+
+    return base64.b64encode(geo_payload).decode("ascii")
+
+
+def _search_filters_signature(filters: list[dict[str, Any]]) -> str:
+    return json.dumps(filters, ensure_ascii=False, sort_keys=True)
+
+
+def _search_session_key(
+    keyword: str,
+    sort: str,
+    note_type: int,
+    filters_signature: str = "",
+) -> tuple[str, str, int, str]:
+    return (keyword.strip(), sort, note_type, filters_signature)
 
 
 def _search_session_path() -> Path:
     return get_config_dir() / "search_sessions.json"
 
 
-def _serialize_search_session_key(key: tuple[str, str, int]) -> str:
-    return json.dumps([key[0], key[1], key[2]], ensure_ascii=False)
+def _serialize_search_session_key(key: tuple[str, str, int, str]) -> str:
+    return json.dumps([key[0], key[1], key[2], key[3]], ensure_ascii=False)
 
 
-def _deserialize_search_session_key(value: str) -> tuple[str, str, int] | None:
+def _deserialize_search_session_key(value: str) -> tuple[str, str, int, str] | None:
     try:
-        keyword, sort, note_type = json.loads(value)
+        parts = json.loads(value)
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
+    if not isinstance(parts, list) or len(parts) not in (3, 4):
+        return None
+    keyword, sort, note_type = parts[:3]
+    filters_signature = parts[3] if len(parts) == 4 else ""
     if not isinstance(keyword, str) or not isinstance(sort, str):
+        return None
+    if not isinstance(filters_signature, str):
         return None
     try:
         normalized_note_type = int(note_type)
     except (TypeError, ValueError):
         return None
-    return (keyword, sort, normalized_note_type)
+    return (keyword, sort, normalized_note_type, filters_signature)
 
 
-def _load_search_session_cache_from_disk(path: Path) -> OrderedDict[tuple[str, str, int], dict[str, Any]]:
+def _load_search_session_cache_from_disk(path: Path) -> OrderedDict[tuple[str, str, int, str], dict[str, Any]]:
     if not path.exists():
         return OrderedDict()
     try:
@@ -93,7 +190,7 @@ def _load_search_session_cache_from_disk(path: Path) -> OrderedDict[tuple[str, s
     if not isinstance(data, dict):
         return OrderedDict()
 
-    normalized: list[tuple[tuple[str, str, int], dict[str, Any]]] = []
+    normalized: list[tuple[tuple[str, str, int, str], dict[str, Any]]] = []
     for raw_key, value in data.items():
         key = _deserialize_search_session_key(raw_key)
         if not key or not isinstance(value, dict):
@@ -144,9 +241,14 @@ def _prune_search_sessions(now: float) -> None:
         _SEARCH_SESSION_CACHE.popitem(last=False)
 
 
-def _acquire_search_session(keyword: str, sort: str, note_type: int) -> tuple[str, bool]:
+def _acquire_search_session(
+    keyword: str,
+    sort: str,
+    note_type: int,
+    filters_signature: str = "",
+) -> tuple[str, bool]:
     now = time.time()
-    key = _search_session_key(keyword, sort, note_type)
+    key = _search_session_key(keyword, sort, note_type, filters_signature)
 
     with _SEARCH_SESSION_LOCK:
         _ensure_search_session_cache_loaded()
@@ -278,8 +380,22 @@ class ReadingEndpointsMixin:
         page_size: int = 20,
         sort: str = "general",
         note_type: int = 0,
+        filters: list[dict[str, Any]] | None = None,
+        geo: str = "",
     ) -> Any:
-        search_id, is_new_session = _acquire_search_session(keyword, sort, note_type)
+        filters_payload = build_search_filters() if filters is None else [
+            {
+                "tags": list(item.get("tags", [])),
+                "type": item.get("type", ""),
+            }
+            for item in filters
+        ]
+        search_id, is_new_session = _acquire_search_session(
+            keyword,
+            sort,
+            note_type,
+            _search_filters_signature(filters_payload),
+        )
         if is_new_session:
             request_id = self._search_request_id()
             try:
@@ -304,8 +420,8 @@ class ReadingEndpointsMixin:
             "sort": sort,
             "note_type": note_type,
             "ext_flags": [],
-            "filters": _SEARCH_DEFAULT_FILTERS,
-            "geo": "",
+            "filters": filters_payload,
+            "geo": geo,
             "image_formats": ["jpg", "webp", "avif"],
         })
         if is_new_session:

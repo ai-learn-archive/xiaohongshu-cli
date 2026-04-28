@@ -1,11 +1,15 @@
 """Unit tests for XHS client request payloads, cookies, and endpoint selection."""
 
+import base64
+import json
+
 from collections import OrderedDict
 
 import httpx
 import pytest
 
 from xhs_cli.client import XhsClient
+from xhs_cli.client_mixins import build_search_filters, build_search_geo
 from xhs_cli.cookies import cache_note_context, get_cached_note_context
 from xhs_cli.exceptions import UnsupportedOperationError, XhsApiError
 
@@ -102,6 +106,36 @@ class TestTransportCookies:
 
 
 class TestReadingEndpointBehavior:
+    def test_build_search_geo_uses_gaode_geocode(self, monkeypatch):
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"geocodes": [{"location": "120.210792,30.206026"}]}
+
+        def fake_get(url, params=None, timeout=None):
+            captured["url"] = url
+            captured["params"] = params
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        monkeypatch.setenv("GAODE_MAP_API_KEY", "test-gaode-key")
+        monkeypatch.setattr("xhs_cli.client_mixins.httpx.get", fake_get)
+
+        geo = build_search_geo("杭州滨江")
+
+        assert captured == {
+            "url": "https://restapi.amap.com/v3/geocode/geo",
+            "params": {"address": "杭州滨江", "key": "test-gaode-key"},
+            "timeout": 10.0,
+        }
+        assert json.loads(base64.b64decode(geo).decode("utf-8")) == {
+            "latitude": 30.206026,
+            "longitude": 120.210792,
+        }
+
     def test_get_note_detail_prefers_cached_xsec_source(self, monkeypatch):
         captured = {}
 
@@ -162,6 +196,79 @@ class TestReadingEndpointBehavior:
         assert notes_payload["page"] == 2
         assert notes_payload["filters"][0]["type"] == "sort_type"
         assert notes_payload["filters"][1]["type"] == "filter_note_type"
+
+    def test_search_notes_sends_selected_filter_tags(self, monkeypatch):
+        captured = {}
+
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE", OrderedDict())
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE_LOADED", True)
+
+        def fake_get(self, uri, params=None):
+            return {"ok": True}
+
+        def fake_post(self, uri, data, header_overrides=None):
+            if uri == "/api/sns/web/v1/search/notes":
+                captured["data"] = data
+                return {"items": [], "has_more": False}
+            return {"ok": True}
+
+        monkeypatch.setattr(XhsClient, "_main_api_get", fake_get)
+        monkeypatch.setattr(XhsClient, "_main_api_post", fake_post)
+
+        client = XhsClient({"a1": "cookie"})
+        try:
+            client.search_notes(
+                "旅行",
+                sort="popularity_descending",
+                geo="encoded-geo",
+                filters=build_search_filters(
+                    note_type_tag="视频",
+                    time_tag="一周内",
+                    range_tag="已关注",
+                    distance_tag="同城",
+                ),
+            )
+        finally:
+            client.close()
+
+        assert captured["data"]["filters"] == [
+            {"tags": ["general"], "type": "sort_type"},
+            {"tags": ["视频"], "type": "filter_note_type"},
+            {"tags": ["一周内"], "type": "filter_note_time"},
+            {"tags": ["已关注"], "type": "filter_note_range"},
+            {"tags": ["同城"], "type": "filter_pos_distance"},
+        ]
+        assert captured["data"]["geo"] == "encoded-geo"
+
+    def test_search_notes_allows_sort_type_filter_override(self, monkeypatch):
+        captured = {}
+
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE", OrderedDict())
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE_LOADED", True)
+
+        def fake_get(self, uri, params=None):
+            return {"ok": True}
+
+        def fake_post(self, uri, data, header_overrides=None):
+            if uri == "/api/sns/web/v1/search/notes":
+                captured["data"] = data
+                return {"items": [], "has_more": False}
+            return {"ok": True}
+
+        monkeypatch.setattr(XhsClient, "_main_api_get", fake_get)
+        monkeypatch.setattr(XhsClient, "_main_api_post", fake_post)
+
+        client = XhsClient({"a1": "cookie"})
+        try:
+            client.search_notes(
+                "旅行",
+                sort="popularity_descending",
+                filters=build_search_filters(sort_tag="最多点赞"),
+            )
+        finally:
+            client.close()
+
+        assert captured["data"]["filters"][0] == {"tags": ["最多点赞"], "type": "sort_type"}
 
     def test_search_notes_reuses_search_id_across_pages(self, monkeypatch):
         calls = []
