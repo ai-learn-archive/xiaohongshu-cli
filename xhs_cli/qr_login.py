@@ -364,91 +364,96 @@ def _browser_assisted_qrcode_login(
     if headless and not has_display and not force_headless:
         _emit_status(on_status, "ℹ️  No DISPLAY detected; launching browser in headless mode.")
 
-    with Camoufox(headless=headless) as browser:
-        page = browser.new_page()
+    try:
+        with Camoufox(headless=headless) as browser:
+            page = browser.new_page()
 
-        def _handle_response(response) -> None:
-            url = response.url
-            if QR_USERINFO_ENDPOINT not in url:
-                return
+            def _handle_response(response) -> None:
+                url = response.url
+                if QR_USERINFO_ENDPOINT not in url:
+                    return
+                try:
+                    payload = _unwrap_browser_response_payload(response.json())
+                except Exception as exc:
+                    logger.debug("Failed to parse browser QR poll response: %s", exc)
+                    return
+
+                code_status = int(payload.get("codeStatus", -1))
+                if code_status == state["last_status"]:
+                    return
+                state["last_status"] = code_status
+
+                if code_status == QR_SCANNED:
+                    _emit_status(on_status, "📲 Scanned! Waiting for confirmation...")
+                elif code_status == QR_CONFIRMED:
+                    _emit_status(on_status, "✅ Login confirmed!")
+
+            page.on("response", _handle_response)
+
             try:
-                payload = _unwrap_browser_response_payload(response.json())
+                with page.expect_response(
+                    lambda response: QR_CREATE_ENDPOINT in response.url and response.request.method == "POST",
+                    timeout=20_000,
+                ) as qr_response_info:
+                    page.goto(LOGIN_URL, wait_until="domcontentloaded")
             except Exception as exc:
-                logger.debug("Failed to parse browser QR poll response: %s", exc)
-                return
+                raise XhsApiError("Failed to load Xiaohongshu login page in Camoufox.") from exc
 
-            code_status = int(payload.get("codeStatus", -1))
-            if code_status == state["last_status"]:
-                return
-            state["last_status"] = code_status
+            qr_payload = _browser_response_payload(qr_response_info.value)
+            qr_url = str(qr_payload.get("url", "")).strip()
+            if not qr_url:
+                raise XhsApiError(f"Browser-assisted QR login did not expose a QR URL: {qr_payload}")
 
-            if code_status == QR_SCANNED:
-                _emit_status(on_status, "📲 Scanned! Waiting for confirmation...")
-            elif code_status == QR_CONFIRMED:
-                _emit_status(on_status, "✅ Login confirmed!")
+            _emit_status(on_status, "\n📱 Scan the QR code below with the Xiaohongshu app:\n")
+            if not _display_qr_in_terminal(qr_url):
+                _emit_status(on_status, "⚠️  Install 'qrcode' for terminal rendering: pip install qrcode")
+                _emit_status(on_status, f"QR URL: {qr_url}")
+            _emit_status(on_status, "\n⏳ Waiting for QR code scan...")
 
-        page.on("response", _handle_response)
+            try:
+                with page.expect_response(
+                    lambda response: QR_STATUS_ENDPOINT in response.url and response.request.method == "GET",
+                    timeout=timeout_s * 1000,
+                ) as completion_info:
+                    pass
+            except Exception as exc:
+                raise XhsApiError("QR code login timed out while waiting for browser completion.") from exc
 
-        try:
-            with page.expect_response(
-                lambda response: QR_CREATE_ENDPOINT in response.url and response.request.method == "POST",
-                timeout=20_000,
-            ) as qr_response_info:
-                page.goto(LOGIN_URL, wait_until="domcontentloaded")
-        except Exception as exc:
-            raise XhsApiError("Failed to load Xiaohongshu login page in Camoufox.") from exc
+            _raise_for_browser_response(completion_info.value)
+            completion_data = _browser_response_payload(completion_info.value)
+            login_info = completion_data.get("login_info", {})
+            if not isinstance(login_info, dict):
+                login_info = {}
 
-        qr_payload = _browser_response_payload(qr_response_info.value)
-        qr_url = str(qr_payload.get("url", "")).strip()
-        if not qr_url:
-            raise XhsApiError(f"Browser-assisted QR login did not expose a QR URL: {qr_payload}")
+            _wait_for_browser_login_settled(page)
 
-        _emit_status(on_status, "\n📱 Scan the QR code below with the Xiaohongshu app:\n")
-        if not _display_qr_in_terminal(qr_url):
-            _emit_status(on_status, "⚠️  Install 'qrcode' for terminal rendering: pip install qrcode")
-            _emit_status(on_status, f"QR URL: {qr_url}")
-        _emit_status(on_status, "\n⏳ Waiting for QR code scan...")
+            cookies = _normalize_browser_cookies(page.context.cookies())
+            session = login_info.get("session")
+            secure_session = login_info.get("secure_session")
+            if isinstance(session, str) and session:
+                cookies["web_session"] = session
+            if isinstance(secure_session, str) and secure_session:
+                cookies["web_session_sec"] = secure_session
 
-        try:
-            with page.expect_response(
-                lambda response: QR_STATUS_ENDPOINT in response.url and response.request.method == "GET",
-                timeout=timeout_s * 1000,
-            ) as completion_info:
-                pass
-        except Exception as exc:
-            raise XhsApiError("QR code login timed out while waiting for browser completion.") from exc
+            required = ("a1", "webId", "web_session")
+            missing = [name for name in required if not cookies.get(name)]
+            if missing:
+                raise XhsApiError(
+                    "Browser-assisted QR login succeeded, but exported cookies were incomplete: "
+                    f"missing={', '.join(missing)} completion_data={completion_data}"
+                )
 
-        _raise_for_browser_response(completion_info.value)
-        completion_data = _browser_response_payload(completion_info.value)
-        login_info = completion_data.get("login_info", {})
-        if not isinstance(login_info, dict):
-            login_info = {}
+            save_cookies(cookies)
 
-        _wait_for_browser_login_settled(page)
+            user_id = str(login_info.get("user_id", "")).strip() or _resolved_user_id(completion_data)
+            if user_id:
+                _emit_status(on_status, f"👤 User ID: {user_id}")
 
-        cookies = _normalize_browser_cookies(page.context.cookies())
-        session = login_info.get("session")
-        secure_session = login_info.get("secure_session")
-        if isinstance(session, str) and session:
-            cookies["web_session"] = session
-        if isinstance(secure_session, str) and secure_session:
-            cookies["web_session_sec"] = secure_session
-
-        required = ("a1", "webId", "web_session")
-        missing = [name for name in required if not cookies.get(name)]
-        if missing:
-            raise XhsApiError(
-                "Browser-assisted QR login succeeded, but exported cookies were incomplete: "
-                f"missing={', '.join(missing)} completion_data={completion_data}"
-            )
-
-        save_cookies(cookies)
-
-        user_id = str(login_info.get("user_id", "")).strip() or _resolved_user_id(completion_data)
-        if user_id:
-            _emit_status(on_status, f"👤 User ID: {user_id}")
-
-        return cookies
+            return cookies
+    except Exception as exc:
+        # Camoufox/Playwright can fail in headless server environments (e.g. addon path issues).
+        # Treat as "browser backend unavailable" so callers can fall back to the HTTP QR flow.
+        raise BrowserQrLoginUnavailable(str(exc)) from exc
 
 
 def _http_qrcode_login(
